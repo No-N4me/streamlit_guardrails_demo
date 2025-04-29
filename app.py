@@ -1,7 +1,6 @@
 import streamlit as st
 from openai import OpenAI
-import guardrails as gd
-from validators import create_validators, validate_with_guard
+from validators import validate_user_input, validate_model_output
 
 # Page configuration
 st.set_page_config(page_title="Guardrails AI Demo", layout="wide")
@@ -13,8 +12,12 @@ if "openai_api_key" not in st.session_state:
     st.session_state.openai_api_key = ""
 if "raw_responses" not in st.session_state:
     st.session_state.raw_responses = {}  # To store raw responses for comparison
+if "show_comparison" not in st.session_state:
+    st.session_state.show_comparison = {}
 if "competitor_list" not in st.session_state:
     st.session_state.competitor_list = ["Apple", "Google", "Microsoft", "Amazon", "Facebook"]
+
+st.sidebar.success("✅ Guardrails Demo App Ready!")
 
 # Main app header
 st.title("Guardrails AI Demonstration")
@@ -34,7 +37,7 @@ with st.sidebar:
     # Model selection
     model = st.selectbox(
         "Select OpenAI Model",
-        ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"]
+        ["gpt-4o-mini-2024-07-18", "gpt-4o-2024-11-20", "o4-mini"]
     )
     
     # Temperature slider
@@ -43,29 +46,18 @@ with st.sidebar:
     # Create validators section
     st.header("Guardrails Validators")
     
-    # Basic validators
-    st.subheader("Basic Validators")
-    valid_length = st.checkbox("Valid Length Check", value=True, 
-                               help="Ensures responses have an appropriate length (10-500 words)")
-    toxicity_check = st.checkbox("Toxicity Check", value=True,
-                                help="Prevents harmful or toxic content")
-    factual_consistency = st.checkbox("Factual Consistency", value=True,
-                                     help="Improves factual accuracy of responses")
-    bias_check = st.checkbox("Bias Check", value=True,
-                            help="Reduces bias in generated content")
-    
-    # Advanced validators (from the examples)
-    st.subheader("Advanced Validators")
+    # Validators for user input
+    st.subheader("Input Validators")
     pii_check = st.checkbox("PII Detection", value=True,
-                          help="Detects and removes personally identifiable information")
-    secrets_check = st.checkbox("Secrets Check", value=True,
-                              help="Prevents exposure of API keys, passwords, etc.")
+                          help="Detects PII in user input and provides warning")
     jailbreak_check = st.checkbox("Jailbreak Detection", value=True,
                                 help="Detects attempts to bypass model safety features")
     
+    # Validators for model output
+    st.subheader("Output Validators")
     # Competitor Check with customizable list
     competitor_check = st.checkbox("Competitor Check", value=False,
-                                 help="Prevents mentioning specific competitor companies")
+                                 help="Prevents mentioning specific competitor companies in model responses")
     
     if competitor_check:
         competitor_input = st.text_area(
@@ -78,17 +70,12 @@ with st.sidebar:
     # Collapsible section for validator details
     with st.expander("Validator Details"):
         st.markdown("""
-        ### Basic Validators
-        - **Valid Length**: Ensures the response is between 10-500 words
-        - **Toxicity Check**: Filters out harmful, offensive, or inappropriate content
-        - **Factual Consistency**: Ensures the response doesn't contain incorrect or misleading information
-        - **Bias Check**: Detects and reduces various forms of bias in the response
-        
-        ### Advanced Validators
-        - **PII Detection**: Identifies and removes personal identifiable information like names, emails, addresses, etc.
-        - **Secrets Check**: Prevents exposure of API keys, passwords, and other sensitive information
+        ### Input Validators
+        - **PII Detection**: Identifies personal identifiable information in user input
         - **Jailbreak Detection**: Identifies and blocks attempts to bypass the model's safety features
-        - **Competitor Check**: Prevents mentioning specific competitor companies in responses
+        
+        ### Output Validators
+        - **Competitor Check**: Prevents mentioning specific competitor companies in model responses
         """)
     
     # About Guardrails section
@@ -106,31 +93,12 @@ with st.sidebar:
     
     # Put all enabled validators in a list
     enabled_validators = []
-    if valid_length:
-        enabled_validators.append("valid_length")
-    if toxicity_check:
-        enabled_validators.append("toxicity_check")
-    if factual_consistency:
-        enabled_validators.append("factual_consistency")
-    if bias_check:
-        enabled_validators.append("bias_check")
     if pii_check:
         enabled_validators.append("pii_check")
-    if secrets_check:
-        enabled_validators.append("secrets_check")
     if jailbreak_check:
         enabled_validators.append("jailbreak_check")
     if competitor_check:
         enabled_validators.append("competitor_check")
-
-# Create the guard with enabled validators
-if use_guardrails and enabled_validators:
-    guard = create_validators(
-        enabled_validators, 
-        competitor_list=st.session_state.competitor_list if "competitor_check" in enabled_validators else None
-    )
-else:
-    guard = None
 
 # Display info about current status
 if use_guardrails:
@@ -147,23 +115,23 @@ def get_openai_response(prompt, history, msg_index):
     messages = []
     for msg in history:
         role = "assistant" if msg["role"] == "assistant" else "user"
-        messages.append({"role": role, "content": msg["content"]})
+        # Ensure content is always a string
+        content = msg["content"]
+        if not isinstance(content, str):
+            content = str(content)
+        messages.append({"role": role, "content": content})
     
     # Add the current prompt
+    # Ensure prompt is a string
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
     messages.append({"role": "user", "content": prompt})
     
     try:
         # Configure the OpenAI client
         client = OpenAI(api_key=st.session_state.openai_api_key)
         
-        # Check if the prompt itself should be validated first (for jailbreak detection)
-        if guard and "jailbreak_check" in enabled_validators:
-            try:
-                validate_with_guard(guard, prompt, "")
-            except Exception as e:
-                return f"Guardrails detected a potential issue with your prompt: {str(e)}"
-        
-        # Get a response without guardrails
+        # Get a response from the model
         response = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -175,18 +143,66 @@ def get_openai_response(prompt, history, msg_index):
         st.session_state.raw_responses[msg_index] = raw_response
         
         # Return raw response if guardrails is disabled
-        if not guard:
+        if not use_guardrails or "competitor_check" not in enabled_validators:
             return raw_response
         
-        # Apply guardrails
-        try:
-            validated_response = validate_with_guard(guard, prompt, raw_response)
-            return validated_response
-        except Exception as e:
-            return f"Guardrails rejected the response with errors:\n\n{str(e)}\n\nOriginal response: {raw_response}"
+        # Apply output guardrails with improved error handling
+        with st.spinner("Applying output validation..."):
+            try:
+                validated_response = validate_model_output(
+                    enabled_validators if use_guardrails else [],
+                    raw_response,
+                    st.session_state.competitor_list
+                )
+                return validated_response
+            except Exception as e:
+                print(f"Output validation error: {str(e)}")
+                return f"Note: Output validation encountered an issue. Showing raw response:\n\n{raw_response}"
     
     except Exception as e:
         return f"Error: {str(e)}"
+
+# Function to process new chat message
+def process_new_message(prompt):
+    original_prompt = prompt
+    
+    # First validate the user input if guardrails is enabled
+    if use_guardrails and any(v in enabled_validators for v in ["pii_check", "jailbreak_check"]):
+        with st.spinner("Validating input..."):
+            try:
+                # Pass the competitor_list parameter
+                is_valid, validated_input = validate_user_input(
+                    enabled_validators if use_guardrails else [],
+                    prompt,
+                    st.session_state.competitor_list
+                )
+                
+                if not is_valid:
+                    # If input validation fails, show error and don't process the message
+                    st.error(validated_input)
+                    return
+                
+                # If input was modified during validation, use the modified version
+                if validated_input != prompt:
+                    st.warning("Input was modified by Guardrails for safety")
+                    prompt = validated_input
+            except Exception as e:
+                st.error(f"Error during input validation: {str(e)}")
+                # Continue with original prompt if validation fails
+                prompt = original_prompt
+    
+    # Add user message to chat history (showing the original prompt to the user)
+    st.session_state.messages.append({"role": "user", "content": original_prompt})
+    
+    # Get the response using the potentially modified prompt
+    with st.spinner("Thinking..."):
+        response = get_openai_response(prompt, st.session_state.messages[:-1], len(st.session_state.messages))
+    
+    # Add assistant response to chat history
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    
+    # Force a rerun to show the updated messages with comparison button
+    st.rerun()
 
 # Create a container for the chat
 chat_container = st.container()
@@ -199,7 +215,18 @@ with chat_container:
             
             # Add "Show Raw Response" button if this is an assistant message and guardrails was used
             if message["role"] == "assistant" and i in st.session_state.raw_responses and use_guardrails:
-                if st.button(f"Compare Raw vs. Validated Response", key=f"compare_{i}"):
+                # Initialize this message's comparison state if not already set
+                if i not in st.session_state.show_comparison:
+                    st.session_state.show_comparison[i] = False
+                
+                # Button to toggle comparison view
+                button_label = "Hide Comparison" if st.session_state.show_comparison[i] else "Compare Raw vs. Validated Response"
+                if st.button(button_label, key=f"compare_{i}"):
+                    st.session_state.show_comparison[i] = not st.session_state.show_comparison[i]
+                    st.rerun()
+                
+                # Show comparison if enabled for this message
+                if st.session_state.show_comparison[i]:
                     st.markdown("### Raw Response (Before Guardrails)")
                     st.markdown(st.session_state.raw_responses[i])
                     st.markdown("### Validated Response (After Guardrails)")
@@ -207,25 +234,7 @@ with chat_container:
 
 # Chat input
 if prompt := st.chat_input("What would you like to know?"):
-    # Add user message to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
-    # Get the current message index
-    msg_index = len(st.session_state.messages) - 1
-    
-    # Display user message
-    with chat_container:
-        with st.chat_message("user"):
-            st.markdown(prompt)
-    
-        # Display assistant response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                response = get_openai_response(prompt, st.session_state.messages[:-1], msg_index + 1)
-                st.markdown(response)
-    
-    # Add assistant response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    process_new_message(prompt)
 
 # Add a footer with information
 st.markdown("---")
