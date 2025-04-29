@@ -16,6 +16,11 @@ if "show_comparison" not in st.session_state:
     st.session_state.show_comparison = {}
 if "competitor_list" not in st.session_state:
     st.session_state.competitor_list = ["Apple", "Google", "Microsoft", "Amazon", "Facebook"]
+# Add new session state for tracking fixed PII inputs
+if "pii_fixed_inputs" not in st.session_state:
+    st.session_state.pii_fixed_inputs = {}  # To store original and fixed versions of PII inputs
+if "show_fixed_pii" not in st.session_state:
+    st.session_state.show_fixed_pii = {}  # Toggle state for showing fixed versions
 
 st.sidebar.success("✅ Guardrails Demo App Ready!")
 
@@ -183,8 +188,16 @@ def process_new_message(prompt):
                     return
                 
                 # If input was modified during validation, use the modified version
-                if validated_input != prompt:
-                    st.warning("Input was modified by Guardrails for safety")
+                if validated_input != prompt and "pii_check" in enabled_validators:
+                    st.warning("PII detected - input was modified for safety")
+                    # Store the original and fixed versions for later display
+                    message_index = len(st.session_state.messages)
+                    st.session_state.pii_fixed_inputs[message_index] = {
+                        "original": original_prompt,
+                        "fixed": validated_input
+                    }
+                    # Initialize the toggle state for this message
+                    st.session_state.show_fixed_pii[message_index] = False
                     prompt = validated_input
             except Exception as e:
                 st.error(f"Error during input validation: {str(e)}")
@@ -212,6 +225,24 @@ with chat_container:
     for i, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            
+            # Add "Show Fixed Prompt" button if this is a user message with PII detected
+            if message["role"] == "user" and i in st.session_state.pii_fixed_inputs:
+                button_label = "Hide Fixed Version" if st.session_state.show_fixed_pii.get(i, False) else "Show Fixed Version (PII Removed)"
+                if st.button(button_label, key=f"pii_button_{i}"):
+                    st.session_state.show_fixed_pii[i] = not st.session_state.show_fixed_pii.get(i, False)
+                    st.rerun()
+                
+                # Show the comparison when toggled on
+                if st.session_state.show_fixed_pii.get(i, False):
+                    with st.container():
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("#### Original Prompt (with PII)")
+                            st.info(st.session_state.pii_fixed_inputs[i]["original"])
+                        with col2:
+                            st.markdown("#### Fixed Prompt (PII Removed)")
+                            st.success(st.session_state.pii_fixed_inputs[i]["fixed"])
             
             # Add "Show Raw Response" button if this is an assistant message and guardrails was used
             if message["role"] == "assistant" and i in st.session_state.raw_responses and use_guardrails:
